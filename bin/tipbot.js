@@ -235,8 +235,10 @@ client.addListener('message', function(from, channel, message) {
                   }
                 };
               }
-              // remove tipper from the list
+              // remove tipper, bot, and ChanServ from the list
               names.splice(names.indexOf(from), 1);
+              names.splice(names.indexOf(client.nick), 1);
+              names.splice('ChanServ', 1);
               // throw out potential doubled nicks such as "user_" or "user|afk"
               // when "user" and "user_" are in the channel
               var check, index, name, trimmed, _i, _j, _len, _len1;
