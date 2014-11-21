@@ -98,8 +98,27 @@ irc.Client.prototype.isIdentified = function(nickname, callback) {
   this.addListener('notice', listener);
 }
 
+irc.Client.prototype.channels = function(nickname, callback) {
+  // request login status
+  this.send('WHOIS', nickname);
+
+  // wait for response
+  var listener = function(response) {
+    var channels = [];
+    for(key in response) {
+      if (key == 'channels' ) {
+        channels = response[key];
+      }
+    }
+    callback(channels);
+    this.removeListener('whois', listener);
+  };
+
+  this.addListener('whois', listener);
+}
+
 irc.Client.prototype.getNames = function(channel, callback) {
-  client.send('NAMES', channel);
+  this.send('NAMES', channel);
   var listener = function(nicks) {
     var names = [];
     for(name in nicks) {
@@ -324,31 +343,112 @@ client.addListener('message', function(from, channel, message) {
           client.say(channel, settings.messages.tip_too_small.expand({from: from, to: to, amount: amount}));
           return;
         }
-        // check balance with min. 5 confirmations
-        coin.getBalance(settings.rpc.prefix + from.toLowerCase(), settings.coin.min_confirmations, function(err, balance) {
-          if(err) {
-            winston.error('Error in !tip command.', err);
-            client.say(channel, settings.messages.error.expand({name: from}));
-            return;
-          }
-          var balance = typeof(balance) == 'object' ? balance.result : balance;
 
-          if(balance >= amount) {
-            coin.send('move', settings.rpc.prefix + from.toLowerCase(), settings.rpc.prefix + to.toLowerCase(), amount, function(err, reply) {
-              if(err || !reply) {
-                winston.error('Error in !tip command', err);
+
+        var send_tip = function(err, results) {
+
+          var valid = typeof(results) == 'object' ? (results.been_tipped || results.in_channel ) : false;
+
+          if (!valid) return;
+
+          // check balance with min. 5 confirmations
+          coin.getBalance(settings.rpc.prefix + from.toLowerCase(), settings.coin.min_confirmations, function(err, balance) {
+            if(err) {
+              winston.error('Error in !tip command.', err);
+              client.say(channel, settings.messages.error.expand({name: from}));
+              return;
+            }
+            var balance = typeof(balance) == 'object' ? balance.result : balance;
+
+            if(balance >= amount) {
+              coin.send('move', settings.rpc.prefix + from.toLowerCase(), settings.rpc.prefix + to.toLowerCase(), amount, function(err, reply) {
+                if(err || !reply) {
+                  winston.error('Error in !tip command', err);
+                  client.say(channel, settings.messages.error.expand({name: from}));
+                  return;
+                }
+
+                winston.info('%s tipped %s %d%s', from, to, amount, settings.coin.short_name)
+                client.say(channel, settings.messages.tipped.expand({from: from, to: to, amount: amount}));
+              });
+            } else {
+              winston.info('%s tried to tip %s %d, but has only %d', from, to, amount, balance);
+              client.say(channel, settings.messages.no_funds.expand({name: from, balance: balance, short: amount - balance, amount: amount}));
+            }
+          });
+        };
+
+        // verify recipient is either in channel or has previously received tip
+
+        client.channels(to, function(channels) {
+          var regexp = new RegExp('^[@\\+]?(\\S+)$');
+          var found = false;
+
+          var send_tip = function(){
+            // check balance with min. 5 confirmations
+            coin.getBalance(settings.rpc.prefix + from.toLowerCase(), settings.coin.min_confirmations, function(err, balance) {
+              if(err) {
+                winston.error('Error in !tip command.', err);
                 client.say(channel, settings.messages.error.expand({name: from}));
                 return;
               }
-
-              winston.info('%s tipped %s %d%s', from, to, amount, settings.coin.short_name)
-              client.say(channel, settings.messages.tipped.expand({from: from, to: to, amount: amount}));
+              var balance = typeof(balance) == 'object' ? balance.result : balance;
+              if(balance >= amount) {
+                coin.send('move', settings.rpc.prefix + from.toLowerCase(), settings.rpc.prefix + to.toLowerCase(), amount, function(err, reply) {
+                  if(err || !reply) {
+                    winston.error('Error in !tip command', err);
+                    client.say(channel, settings.messages.error.expand({name: from}));
+                    return;
+                  }
+                  winston.info('%s tipped %s %d%s', from, to, amount, settings.coin.short_name)
+                  client.say(channel, settings.messages.tipped.expand({from: from, to: to, amount: amount}));
+                  return;
+                });
+              } else {
+                winston.info('%s tried to tip %s %d, but has only %d', from, to, amount, balance);
+                client.say(channel, settings.messages.no_funds.expand({name: from, balance: balance, short: amount - balance, amount: amount}));
+                return;
+              }
             });
-          } else {
-            winston.info('%s tried to tip %s %d, but has only %d', from, to, amount, balance);
-            client.say(channel, settings.messages.no_funds.expand({name: from, balance: balance, short: amount - balance, amount: amount}));
+          };
+
+          // look in channels for username
+          for (var i = channels.length - 1; i >= 0; i--) {
+            var match = channels[i].match(regexp);
+            if (channel == match[1]) {
+              found = true;
+              break;
+            }
+          }
+
+          if (found) {
+            send_tip();
+          }
+
+          // see if have a tip balance
+          else {
+            coin.getBalance(settings.rpc.prefix + to.toLowerCase(), 0, function(err, balance) {
+              if(err) {
+                winston.error('Error in !balance command', err);
+                return;
+              }
+              var balance = typeof(balance) == 'object' ? balance.result : balance;
+              // FIXME need a better test for having ever been tipped...
+              if (balance) {
+                found = true;
+                send_tip();
+              }
+
+              if (!found) {
+                client.say(channel, settings.messages.user_not_in_channel.expand({from: from, to: to}));
+                winston.info('%s tried to tip %s %d, but %s is not in channel', from, to, amount, to);
+                return;
+              }
+
+            });
           }
         });
+
         break;
       case 'address':
         var user = from.toLowerCase();
